@@ -8,7 +8,7 @@ binding = "ASSETS"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "cf-outlook-email"
+database_name = "outlook-email-db"
 database_id = "9aafab6b-f145-446a-8303-67d3e600207f"
 migrations_dir = "migrations"
 
