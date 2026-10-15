@@ -251,6 +251,8 @@ var I18N_EN = {
   '确认删除选中的 {n} 封邮件？（移至「已删除」文件夹）': 'Delete the {n} selected emails? (They move to the Deleted Items folder.)',
   '加载附件...': 'Loading attachments...',
   '附件 ({n})': 'Attachments ({n})',
+  '点击复制': 'Click to copy',
+  '检测到验证码，点击即可复制': 'Verification code detected — click to copy',
   '获取邮件失败': 'Failed to fetch emails',
 
   // --- Temp emails ---

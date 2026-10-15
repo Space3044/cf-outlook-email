@@ -56,8 +56,9 @@ collectDataAttrs(loginHtml);
 const missing = [...usedKeys].filter((k) => CN.test(k) && !Object.prototype.hasOwnProperty.call(I18N_EN, k));
 
 // ---- Check 2: raw Chinese in app.js outside t()/tServer()/comments ----
-// Known allowed fragments (URLs whose anchors are Chinese headings in GUIDE.md)
-const ALLOW = [/GUIDE\.md#/];
+// Known allowed fragments (URLs whose anchors are Chinese headings in GUIDE.md,
+// and the verification-code keyword list that matches email content, not UI copy)
+const ALLOW = [/GUIDE\.md#/, /OTP_KEYWORDS/];
 const rawLeaks = [];
 appJs.split('\n').forEach((line, i) => {
   if (!CN.test(line)) return;

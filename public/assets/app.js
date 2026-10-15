@@ -1320,6 +1320,166 @@ function searchEmails() {
   if (state.selectedAccount) loadEmailList(state.selectedAccount);
 }
 
+// ===== Email detail: click-to-copy addresses & verification codes =====
+// Keywords that introduce a one-time code. Raw Chinese kept for readability;
+// tools/i18n-check.mjs allow-lists this line (it matches email content, not UI copy).
+var OTP_KEYWORDS = '验证码|校验码|动态码|确认码|安全码|一次性密码|verification\\s*code|verify\\s*code|security\\s*code|one[\\s-]?time\\s*(?:password|code|pin)|auth(?:entication)?\\s*code|passcode|\\bcode\\b|\\botp\\b|\\bpin\\b';
+
+// Detect verification codes in an email body. Anchored on common keywords so
+// ordinary numbers (order ids, dates, phone numbers) are not matched by accident.
+function extractOtpCodes(text) {
+  if (!text) return [];
+  var compact = new RegExp('(?:' + OTP_KEYWORDS + ')\\D{0,24}?((?=[A-Za-z0-9]{4,8}(?![A-Za-z0-9]))(?=[A-Za-z0-9]*\\d)[A-Za-z0-9]{4,8})', 'gi');
+  // Digit-by-digit form, e.g. "8 3 4 2 5 1": a separator between every digit.
+  var spaced = new RegExp('(?:' + OTP_KEYWORDS + ')\\D{0,16}?((?:\\d[\\s\\u00a0\\-]){3,7}\\d)', 'gi');
+  var found = [], m;
+  while ((m = compact.exec(text)) !== null) found.push({ i: m.index, code: m[1] });
+  while ((m = spaced.exec(text)) !== null) found.push({ i: m.index, code: m[1].replace(/\D/g, '') });
+  found.sort(function (a, b) { return a.i - b.i; });   // keep document order
+  var out = [], seen = {};
+  for (var k = 0; k < found.length; k++) {
+    var code = found[k].code;
+    if (!code || seen[code]) continue;
+    seen[code] = 1;
+    out.push(code);
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
+// Plain-text view of an HTML body. Block tags become newlines so numbers in
+// separate cells/lines don't merge into a fake code.
+function htmlToText(html) {
+  if (!html) return '';
+  var spaced = String(html)
+    .replace(/<(br|hr)\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|tr|h[1-6]|table|section|article|blockquote)>/gi, '\n');
+  var d = document.createElement('div');
+  d.innerHTML = spaced;
+  return d.textContent || '';
+}
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Escape for an HTML attribute value (esc() alone leaves quotes intact).
+function escAttr(str) {
+  return esc(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Regex matching a code either compact ("834251") or digit-by-digit ("8 3 4 2 5 1").
+function codeRegex(code) {
+  var body = code.split('').map(escapeRegExp).join('[\\s\\u00a0\\-]?');
+  return new RegExp('\\b' + body + '\\b', 'g');
+}
+
+// Escape plain text and wrap detected codes in click-to-copy spans.
+function linkifyCodes(text) {
+  var html = esc(text);
+  extractOtpCodes(text).forEach(function (code) {
+    html = html.replace(codeRegex(code), '<span class="otp-inline" data-copy="' + escAttr(code) + '" onclick="copyChip(this)" title="' + escAttr(t('点击复制')) + '">' + esc(code) + '</span>');
+  });
+  return html;
+}
+
+// Highlight codes inside the sandboxed HTML iframe. Scripts inside the frame are
+// disabled, so both the wrapping and the click handling happen from the parent.
+function decorateFrameCodes(frame) {
+  try {
+    var doc = frame.contentDocument;
+    if (!doc || !doc.body || doc.body.getAttribute('data-otp-decorated')) return;
+    var codes = extractOtpCodes(doc.body.textContent || '');
+    if (!codes.length) return;
+    doc.body.setAttribute('data-otp-decorated', '1');
+
+    var style = doc.createElement('style');
+    style.textContent = '.otp-inline{cursor:pointer;padding:0 3px;border-radius:5px;background:#6366f11f;border-bottom:1px dashed #6366f1;color:#4f46e5;font-weight:600;display:inline-block}.otp-inline:hover{background:#6366f1;color:#fff}.otp-inline.copied{animation:otpPop .35s cubic-bezier(.4,0,.2,1)}@keyframes otpPop{0%{transform:scale(1)}35%{transform:scale(1.15)}100%{transform:scale(1)}}';
+    (doc.head || doc.documentElement).appendChild(style);
+
+    codes.forEach(function (code) { wrapCodeInNode(doc.body, code); });
+    doc.addEventListener('click', function (ev) {
+      var el = ev.target && ev.target.closest ? ev.target.closest('.otp-inline') : null;
+      if (el) { ev.preventDefault(); copyChip(el); }
+    });
+  } catch (err) { /* cross-origin or detached frame: skip decoration */ }
+}
+
+function wrapCodeInNode(root, code) {
+  var re = codeRegex(code);
+  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  var targets = [], n;
+  while ((n = walker.nextNode())) {
+    var p = n.parentNode;
+    if (!p || p.nodeName === 'SCRIPT' || p.nodeName === 'STYLE') continue;
+    if (p.classList && p.classList.contains('otp-inline')) continue;
+    if (n.nodeValue && n.nodeValue.indexOf(code) !== -1) targets.push(n);
+  }
+  targets.forEach(function (node) {
+    var text = node.nodeValue, frag = document.createDocumentFragment();
+    var last = 0, m;
+    re.lastIndex = 0;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      var span = document.createElement('span');
+      span.className = 'otp-inline';
+      span.setAttribute('data-copy', m[0]);
+      span.textContent = m[0];
+      frag.appendChild(span);
+      last = m.index + m[0].length;
+    }
+    if (!frag.childNodes.length) return;
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    node.parentNode.replaceChild(frag, node);
+  });
+}
+
+// Copy the value in data-copy and flash the chip. Works for parent-DOM chips and
+// for the spans we inject inside the email iframe.
+function copyChip(el) {
+  var text = el.getAttribute('data-copy') || '';
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(function () {
+    el.classList.add('copied');
+    var label = el.querySelector('.otp-code-copy');
+    var orig = label ? label.textContent : '';
+    if (label) label.textContent = t('已复制');
+    setTimeout(function () {
+      el.classList.remove('copied');
+      if (label) label.textContent = orig;
+    }, 1000);
+    toast(t('已复制') + ': ' + text, 'success', 1600);
+  }).catch(function () { toast(t('复制失败'), 'error'); });
+}
+
+// Click-to-copy chip for a sender/recipient address.
+function addressChipHtml(name, addr) {
+  if (!addr) return '';
+  var label = name && name !== addr ? '<span class="addr-name">' + esc(name) + '</span>' : '';
+  return '<button type="button" class="addr-chip" data-copy="' + escAttr(addr) + '" onclick="copyChip(this)" title="' + escAttr(t('点击复制')) + '">' +
+    label + '<span class="addr-mail">' + esc(addr) + '</span>' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>' +
+    '</button>';
+}
+
+// Prominent "code detected" card shown above the body.
+function otpCalloutHtml(codes) {
+  if (!codes || !codes.length) return '';
+  return '<div class="otp-callout">' +
+    '<div class="otp-callout-label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-2px"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg> ' + esc(t('检测到验证码，点击即可复制')) + '</div>' +
+    '<div class="otp-callout-codes">' + codes.map(function (c) {
+      return '<button type="button" class="otp-code" data-copy="' + escAttr(c) + '" onclick="copyChip(this)" title="' + escAttr(t('点击复制')) + '">' +
+        '<span class="otp-code-value">' + esc(c) + '</span>' +
+        '<span class="otp-code-copy">' + esc(t('复制')) + '</span></button>';
+    }).join('') + '</div></div>';
+}
+
+// iframe load handler: size to content, then make any codes clickable.
+function onEmailFrameLoad(frame) {
+  resizeFrame(frame);
+  decorateFrameCodes(frame);
+}
+
 async function viewEmail(index) {
   const email = state.emailList[index];
   if (!email) return;
@@ -1339,22 +1499,38 @@ async function viewEmail(index) {
   }
 
   const e = res.data;
-  const bodyContent = e.body?.contentType === 'html'
-    ? `<iframe id="emailFrame" sandbox="allow-same-origin" onload="resizeFrame(this)"></iframe>`
-    : `<pre style="white-space:pre-wrap;font-family:inherit">${esc(e.body?.content || e.bodyPreview || '')}</pre>`;
+  const isHtml = e.body?.contentType === 'html';
+  const plainText = isHtml ? htmlToText(e.body?.content || '') : (e.body?.content || e.bodyPreview || '');
+  const otpCodes = extractOtpCodes(plainText);
+  const bodyContent = isHtml
+    ? `<iframe id="emailFrame" sandbox="allow-same-origin" onload="onEmailFrameLoad(this)"></iframe>`
+    : `<pre style="white-space:pre-wrap;font-family:inherit">${linkifyCodes(plainText)}</pre>`;
+  const from = e.from || {};
+  const toList = e.toRecipients || [];
+  const ccList = e.ccRecipients || [];
 
   pane.innerHTML = `
     <div class="detail-pane" style="border:none;padding:0">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
-        <h2 style="flex:1">${esc(tServer(e.subject))}</h2>
-        <button class="btn btn-danger btn-sm" style="flex-shrink:0" onclick="deleteCurrentEmail('${esc(e.id)}')">${t('删除')}</button>
+      <div class="detail-head">
+        <h2>${esc(tServer(e.subject))}</h2>
+        <button class="btn btn-danger btn-sm" onclick="deleteCurrentEmail('${esc(e.id)}')">${t('删除')}</button>
       </div>
       <div class="detail-meta">
-        <span>${t('发件人:')} ${esc(e.from?.name || '')} &lt;${esc(e.from?.address || '')}&gt;</span><br>
-        <span>${t('收件人:')} ${(e.toRecipients || []).map(r => esc(r.address)).join(', ')}</span><br>
-        ${e.ccRecipients?.length ? `<span>${t('抄送:')} ${e.ccRecipients.map(r => esc(r.address)).join(', ')}</span><br>` : ''}
-        <span>${t('时间:')} ${formatDate(e.receivedDateTime)}</span>
+        <div class="addr-row">
+          <span class="addr-label">${t('发件人:')}</span>
+          ${addressChipHtml(from.name, from.address)}
+        </div>
+        <div class="addr-row">
+          <span class="addr-label">${t('收件人:')}</span>
+          ${toList.map(r => addressChipHtml(r.name, r.address)).join('') || '<span class="addr-none">—</span>'}
+        </div>
+        ${ccList.length ? `<div class="addr-row"><span class="addr-label">${t('抄送:')}</span>${ccList.map(r => addressChipHtml(r.name, r.address)).join('')}</div>` : ''}
+        <div class="addr-row">
+          <span class="addr-label">${t('时间:')}</span>
+          <span class="detail-time">${formatDate(e.receivedDateTime)}</span>
+        </div>
       </div>
+      ${otpCalloutHtml(otpCodes)}
       ${e.hasAttachments ? '<div id="emailAttachments" style="margin-bottom:16px"></div>' : ''}
       <div class="detail-body">${bodyContent}</div>
     </div>
@@ -1362,13 +1538,14 @@ async function viewEmail(index) {
 
   if (e.hasAttachments) loadAttachments(e.id);
 
-  if (e.body?.contentType === 'html') {
+  if (isHtml) {
     const frame = document.getElementById('emailFrame');
     if (frame) {
       const doc = frame.contentDocument;
       doc.open();
       doc.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:sans-serif;font-size:14px;color:#333;margin:12px;}</style></head><body>${e.body.content}</body></html>`);
       doc.close();
+      decorateFrameCodes(frame);
     }
   }
 }
@@ -1560,14 +1737,20 @@ async function viewTempMessage(emailId, messageId) {
   // the main mailbox detail view) so malicious markup - e.g. <img onerror> - can't
   // execute in the app origin. Plain-text bodies stay escaped in a <pre>.
   const isHtml = e.body_type === 'html';
+  const plainText = isHtml ? htmlToText(e.body || '') : String(e.body || '');
+  const otpCodes = extractOtpCodes(plainText);
   const bodyContent = isHtml
-    ? `<iframe id="tempMailFrame" sandbox="allow-same-origin" onload="resizeFrame(this)" style="width:100%;border:none;min-height:300px;background:#fff;border-radius:var(--radius)"></iframe>`
-    : `<pre style="white-space:pre-wrap;font-family:inherit;font-size:14px;line-height:1.7">${esc(String(e.body || ''))}</pre>`;
+    ? `<iframe id="tempMailFrame" sandbox="allow-same-origin" onload="onEmailFrameLoad(this)" style="width:100%;border:none;min-height:300px;background:#fff;border-radius:var(--radius)"></iframe>`
+    : `<pre style="white-space:pre-wrap;font-family:inherit;font-size:14px;line-height:1.7">${linkifyCodes(plainText)}</pre>`;
   pane.innerHTML = `
     <div>
       <button class="btn btn-sm" onclick="loadTempMessages(${emailId})" style="margin-bottom:12px">${t('← 返回列表')}</button>
       <h3>${esc(tServer(String(e.subject)))}</h3>
-      <div style="color:var(--text-muted);font-size:13px;margin:8px 0">From: ${esc(String(e.from))} → ${esc(String(e.to))}</div>
+      <div class="detail-meta" style="margin:8px 0">
+        <div class="addr-row"><span class="addr-label">${t('发件人:')}</span>${addressChipHtml('', String(e.from))}</div>
+        <div class="addr-row"><span class="addr-label">${t('收件人:')}</span>${addressChipHtml('', String(e.to))}</div>
+      </div>
+      ${otpCalloutHtml(otpCodes)}
       <div style="margin-top:16px">${bodyContent}</div>
     </div>
   `;
@@ -1579,6 +1762,7 @@ async function viewTempMessage(emailId, messageId) {
       doc.open();
       doc.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:sans-serif;font-size:14px;color:#333;margin:12px;}</style></head><body>${e.body || ''}</body></html>`);
       doc.close();
+      decorateFrameCodes(frame);
     }
   }
 }
