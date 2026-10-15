@@ -450,14 +450,15 @@ async function renderAccounts(el) {
     <button class="btn btn-sm" onclick="showImportModal()">${t('批量导入')}</button>
     <button class="btn btn-sm" onclick="exportAccounts()">${t('导出全部')}</button>
   </div>
-  <div id="batchBar" style="display:none;margin-top:10px;padding:10px 14px;background:var(--primary-bg);border:1px solid var(--border-focus);border-radius:8px;align-items:center;gap:8px;font-size:13px">
-    <span id="batchCount" style="color:var(--primary)"></span>
-    <button class="btn btn-sm" onclick="batchAction('move')">${t('移动分组')}</button>
-    <button class="btn btn-sm" onclick="batchAction('enable')">${t('批量启用')}</button>
-    <button class="btn btn-sm" onclick="batchAction('disable')">${t('批量停用')}</button>
-    <button class="btn btn-sm" onclick="exportSelected()">${t('导出选中')}</button>
-    <button class="btn btn-sm btn-danger" onclick="batchAction('delete')">${t('批量删除')}</button>
-    <button class="btn btn-sm" onclick="clearSelection()">${t('取消选择')}</button>
+  <div id="batchBar" style="display:flex;margin-top:10px;padding:10px 14px;background:var(--primary-bg);border:1px solid var(--border-focus);border-radius:8px;align-items:center;gap:8px;font-size:13px">
+    <span id="batchCount" style="color:var(--primary)">${t('未选中')}</span>
+    <button class="btn btn-sm" id="btnBatchTest" onclick="batchTestAccounts()" disabled>${t('批量测试')}</button>
+    <button class="btn btn-sm" id="btnBatchMove" onclick="batchAction('move')" disabled>${t('移动分组')}</button>
+    <button class="btn btn-sm" id="btnBatchEnable" onclick="batchAction('enable')" disabled>${t('批量启用')}</button>
+    <button class="btn btn-sm" id="btnBatchDisable" onclick="batchAction('disable')" disabled>${t('批量停用')}</button>
+    <button class="btn btn-sm" id="btnBatchExport" onclick="exportSelected()" disabled>${t('导出选中')}</button>
+    <button class="btn btn-sm btn-danger" id="btnBatchDelete" onclick="batchAction('delete')" disabled>${t('批量删除')}</button>
+    <button class="btn btn-sm" id="btnBatchClear" onclick="clearSelection()" disabled>${t('取消选择')}</button>
   </div>
   </div>`;
 
@@ -564,6 +565,7 @@ function renderAccountRows(accounts) {
     <td style="white-space:nowrap">
       <button class="btn btn-sm" onclick="showEditAccountModal(${a.id})">${t('编辑')}</button>
       <button class="btn btn-sm" onclick="testAccount(${a.id},this)">${t('测试')}</button>
+      <button class="btn btn-sm" onclick="copyApiCommand(${a.id},this)">${t('API')}</button>
       <button class="btn btn-sm" onclick="exportAccounts([${a.id}])">${t('导出')}</button>
       <button class="btn btn-sm" onclick="toggleAccountStatus(${a.id},'${a.status}')">${a.status === 'active' ? t('停用') : t('启用')}</button>
       <button class="btn btn-sm btn-danger" onclick="deleteAccount(${a.id})">${t('删除')}</button>
@@ -662,12 +664,21 @@ function clearSelection() {
 function updateBatchBar() {
   const bar = document.getElementById('batchBar');
   if (!bar) return;
-  if (selectedAccountIds.size > 0) {
-    bar.style.display = 'flex';
-    document.getElementById('batchCount').textContent = t('已选 {n} 个', { n: selectedAccountIds.size });
-  } else {
-    bar.style.display = 'none';
+  const count = selectedAccountIds.size;
+  const hasSelection = count > 0;
+
+  // Update count text
+  const countSpan = document.getElementById('batchCount');
+  if (countSpan) {
+    countSpan.textContent = hasSelection ? t('已选 {n} 个', { n: count }) : t('未选中');
   }
+
+  // Enable/disable all batch action buttons based on selection state
+  const buttons = ['btnBatchTest', 'btnBatchMove', 'btnBatchEnable', 'btnBatchDisable', 'btnBatchExport', 'btnBatchDelete', 'btnBatchClear'];
+  buttons.forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = !hasSelection;
+  });
 }
 
 async function batchAction(action) {
@@ -972,6 +983,64 @@ async function testAccount(id, btn) {
     toast(res?.data?.error || res?.error?.message || t('连接失败'), 'error');
   }
   navigate('accounts');
+}
+
+// Batch test connections: parallel requests with a cap of 40 (subrequest limit)
+async function batchTestAccounts() {
+  const ids = [...selectedAccountIds];
+  if (!ids.length) return;
+
+  const MAX_BATCH = 40;
+  if (ids.length > MAX_BATCH) {
+    toast(t('单次最多测试 {n} 个账号，请分批选择', { n: MAX_BATCH }), 'error');
+    return;
+  }
+
+  const btn = document.getElementById('btnBatchTest');
+  if (btn) { btn.disabled = true; btn.textContent = t('测试中...'); }
+
+  // Fire all test requests in parallel
+  const results = await Promise.all(
+    ids.map(id => api(`/accounts/${id}/test`, { method: 'POST' }))
+  );
+
+  if (btn) { btn.disabled = false; btn.textContent = t('批量测试'); }
+
+  const success = results.filter(r => r?.success && r.data?.connected).length;
+  const failed = ids.length - success;
+
+  if (failed === 0) {
+    toast(t('全部连接正常 ({n} 个)', { n: success }), 'success');
+  } else {
+    toast(t('{ok} 个成功，{fail} 个失败', { ok: success, fail: failed }), failed > success ? 'error' : 'warning');
+  }
+
+  // Refresh the accounts page to reflect any status changes
+  navigate('accounts');
+}
+
+// Copy API command for a single account (curl example with email pre-filled)
+async function copyApiCommand(accountId, btn) {
+  const acc = state.accounts.find(a => a.id === accountId);
+  if (!acc) return;
+
+  // Fetch the external API key from settings
+  const res = await api('/settings');
+  const apiKey = res?.data?.external_api_key;
+  if (!apiKey) {
+    toast(t('对外 API 未启用，请先在「系统设置」生成 API Key'), 'error');
+    return;
+  }
+
+  const workerUrl = window.location.origin;
+  const command = `curl "${workerUrl}/api/external/emails?email=${encodeURIComponent(acc.email)}&top=5" -H "X-API-Key: ${apiKey}"`;
+
+  await navigator.clipboard.writeText(command);
+
+  const orig = btn.textContent;
+  btn.textContent = t('已复制');
+  setTimeout(() => { btn.textContent = orig; }, 2000);
+  toast(t('API 调用命令已复制'), 'success');
 }
 
 async function toggleAccountStatus(id, currentStatus) {

@@ -31,6 +31,9 @@ GET /api/external/emails
 | `folder` | ❌ | `inbox`(默认) / `junkemail` / `deleteditems` / `all`（收件箱+垃圾箱合并） |
 | `top` | ❌ | 返回条数，默认 10，最大 50 |
 | `keyword` | ❌ | 搜索关键词 |
+| `includeBody` | ❌ | 传 `1` 时每封邮件额外返回 `body` 字段（完整纯文本正文，不截断） |
+
+> **关于 `bodyPreview` 截断**：`bodyPreview` 是 Microsoft Graph 固定截断到 **255 字符**的预览字段，无法配置成不截断。需要完整正文时请加 `includeBody=1`，从返回的 `body` 字段取（响应体会相应变大，建议配合较小的 `top` 使用）。
 
 ## 3. 调用示例
 
@@ -46,6 +49,16 @@ curl "https://你的域名/api/external/emails?email=abc@outlook.com&key=你的K
 curl "https://你的域名/api/external/emails?email=abc@outlook.com" \
   -H "X-API-Key: 你的Key"
 ```
+
+**取完整正文（不截断，验证测试方法）**
+
+```bash
+# 只取最新 1 封并带完整正文；对比 bodyPreview（最多 255 字符）与 body（完整）
+curl "https://你的域名/api/external/emails?email=abc@outlook.com&top=1&includeBody=1" \
+  -H "X-API-Key: 你的Key"
+```
+
+预期：返回的每个 item 里同时有 `bodyPreview`（预览，≤255 字符）和 `body`（完整纯文本正文）；不传 `includeBody` 时没有 `body` 字段。
 
 **Python（取最新验证码的典型用法）**
 
@@ -90,6 +103,8 @@ for mail in data["data"]["items"]:
   }
 }
 ```
+
+> 加 `includeBody=1` 时，每个 item 会多一个 `"body": "完整纯文本正文..."` 字段。
 
 失败：
 

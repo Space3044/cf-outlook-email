@@ -26,7 +26,7 @@ external.use('*', async (c, next) => {
   await next();
 });
 
-// GET /api/external/emails?email=<addr>&folder=inbox|junkemail|deleteditems|all&top=10&keyword=
+// GET /api/external/emails?email=<addr>&folder=inbox|junkemail|deleteditems|all&top=10&keyword=&includeBody=1
 external.get('/emails', async (c) => {
   const email = (c.req.query('email') || '').trim().toLowerCase();
   if (!email) return fail('BAD_REQUEST', '缺少 email 参数', 400);
@@ -34,6 +34,8 @@ external.get('/emails', async (c) => {
   const folder = c.req.query('folder') || 'inbox';
   const top = Math.min(parseInt(c.req.query('top') || '10', 10) || 10, 50);
   const keyword = c.req.query('keyword') || undefined;
+  // bodyPreview is truncated to 255 chars by Graph; includeBody=1 adds the full plain-text body
+  const includeBody = ['1', 'true'].includes((c.req.query('includeBody') || '').toLowerCase());
 
   const acc = await first<AccountRow>(
     c.env.DB,
@@ -60,7 +62,7 @@ external.get('/emails', async (c) => {
     await run(c.env.DB, "UPDATE accounts SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [acc.id]);
   }
 
-  const result = await fetchEmails(tok.token, { folder, top, skip: 0, keyword });
+  const result = await fetchEmails(tok.token, { folder, top, skip: 0, keyword, includeBody });
   if (result.error) return fail('GRAPH_ERROR', result.error.message, 502);
 
   const items = (result.items ?? []).map((e) => ({
@@ -72,6 +74,7 @@ external.get('/emails', async (c) => {
     },
     receivedDateTime: e.receivedDateTime,
     bodyPreview: e.bodyPreview ?? '',
+    ...(includeBody ? { body: e.body?.content ?? '' } : {}),
     isRead: e.isRead,
   }));
 

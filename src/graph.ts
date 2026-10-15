@@ -59,16 +59,16 @@ export async function getAccessToken(
 // Fetch email list from inbox
 export async function fetchEmails(
   accessToken: string,
-  options: { folder?: string; top?: number; skip?: number; keyword?: string } = {}
+  options: { folder?: string; top?: number; skip?: number; keyword?: string; includeBody?: boolean } = {}
 ): Promise<{ items?: GraphMailMessage[]; error?: GraphError }> {
-  const { folder = 'inbox', top = 20, skip = 0, keyword } = options;
+  const { folder = 'inbox', top = 20, skip = 0, keyword, includeBody = false } = options;
 
   // Aggregated view: merge inbox + junk, sorted by date desc. Single page (skip ignored)
   // to keep merged ordering correct; 2 subrequests stay within the free-tier budget.
   if (folder === 'all') {
     const [inbox, junk] = await Promise.all([
-      fetchEmails(accessToken, { folder: 'inbox', top, skip: 0, keyword }),
-      fetchEmails(accessToken, { folder: 'junkemail', top, skip: 0, keyword }),
+      fetchEmails(accessToken, { folder: 'inbox', top, skip: 0, keyword, includeBody }),
+      fetchEmails(accessToken, { folder: 'junkemail', top, skip: 0, keyword, includeBody }),
     ]);
     // If both fail, surface the error; otherwise show whatever succeeded
     if (inbox.error && junk.error) return { error: inbox.error };
@@ -79,11 +79,15 @@ export async function fetchEmails(
   }
 
   let url = `${GRAPH_BASE}/me/mailFolders/${folder}/messages`;
+  // bodyPreview is hard-capped at 255 chars by Graph; select `body` for the full text.
+  // Same single Graph request either way, so the subrequest budget is unaffected.
   const params = new URLSearchParams({
     $top: String(top),
     $skip: String(skip),
     $orderby: 'receivedDateTime desc',
-    $select: 'id,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments',
+    $select:
+      'id,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments' +
+      (includeBody ? ',body' : ''),
   });
 
   const headers: Record<string, string> = {
